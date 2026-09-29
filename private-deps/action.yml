@@ -1,0 +1,81 @@
+name: private-deps
+description: Step-scoped, read-only git authentication for private GitHub git dependencies (PAT or GitHub App token).
+author: Imentiv
+
+inputs:
+  token:
+    description: PAT or fine-grained token with read access to the private repositories. Mutually exclusive with app-id.
+    required: false
+    default: ''
+  app-id:
+    description: GitHub App ID (App mode). Requires private-key and repositories.
+    required: false
+    default: ''
+  private-key:
+    description: GitHub App private key (App mode).
+    required: false
+    default: ''
+  owner:
+    description: Owner (user or org) of the installation and repositories (App mode). Defaults to the owner of the calling repository; set it explicitly when the private repositories live in another org.
+    required: false
+    default: ''
+  repositories:
+    description: Newline-separated repository names to grant contents:read on. Required in App mode; has no default.
+    required: false
+    default: ''
+  run:
+    description: Command(s) to run with git authentication, in this step only. When empty, the action only produces the token output.
+    required: false
+    default: ''
+  working-directory:
+    description: Directory in which to run the command.
+    required: false
+    default: '.'
+
+outputs:
+  token:
+    description: Masked token, for passing to a BuildKit secret mount in the same job. Do not forward it through job outputs.
+    value: ${{ steps.resolve.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        APP_ID: ${{ inputs.app-id }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        REPOSITORIES: ${{ inputs.repositories }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: '"$ACTION_PATH/validate-inputs.sh"'
+
+    - name: Mint GitHub App token
+      id: app-token
+      if: inputs.app-id != ''
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ inputs.owner }}
+        repositories: ${{ inputs.repositories }}
+        permission-contents: read
+
+    - name: Resolve token
+      id: resolve
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token || steps.app-token.outputs.token }}
+      run: |
+        echo "::add-mask::$TOKEN"
+        echo "token=$TOKEN" >>"$GITHUB_OUTPUT"
+
+    - name: Run with git authentication
+      if: inputs.run != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PRIVATE_DEPS_TOKEN: ${{ steps.resolve.outputs.token }}
+        PRIVATE_DEPS_RUN: ${{ inputs.run }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: '"$ACTION_PATH/with-github-token.sh" bash -euo pipefail -c "$PRIVATE_DEPS_RUN"'
