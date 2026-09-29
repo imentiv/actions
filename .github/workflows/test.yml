@@ -43,7 +43,8 @@ jobs:
           fail=0
           bad() { echo "::error::$1"; fail=1; }
           env | grep -E '^(GIT_CONFIG_|GIT_ASKPASS|PRIVATE_DEPS_)' && bad "git/private-deps env leaked"
-          env | grep -q 'dummy-canary' && bad "canary present in environment"
+          # OUT_TOKEN carries the documented token output by design; exclude it.
+          env -u OUT_TOKEN | grep -q 'dummy-canary' && bad "canary present in environment"
           git config --global --list 2>/dev/null | grep -qi 'github\.com' && bad "github.com in global git config"
           test -e "$HOME/.git-credentials" && bad "git-credentials file exists in HOME"
           git config --list --show-origin | grep -q 'dummy-canary' && bad "canary in git config"

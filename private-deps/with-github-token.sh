@@ -31,24 +31,30 @@ unset token
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/with-github-token.XXXXXX")"
 child=""
-# shellcheck disable=SC2329  # invoked via trap
+# shellcheck disable=SC2317,SC2329  # invoked via trap
 cleanup() { rm -rf "$tmp"; }
-# shellcheck disable=SC2329  # invoked via trap
+# The child leads its own process group (set -m below), so a signal reaches
+# everything it spawned, not just the direct child.
+# shellcheck disable=SC2317,SC2329  # invoked via trap
 forward() {
-  if [[ -n $child ]]; then kill -TERM "$child" 2>/dev/null || true; fi
+  if [[ -n $child ]]; then kill -TERM -- "-$child" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 trap forward INT TERM
 
-# The prompts are matched exactly (no trailing glob), so lookalike hosts such
-# as github.com.evil.example or github.com:8443 are refused.
+# The scheme and authority are matched exactly and must be followed by "/" or
+# the closing quote, so lookalike hosts such as github.com.evil.example or
+# github.com:8443 are refused. A path may follow the host (credential.useHttpPath).
 cat >"$tmp/askpass" <<'ASKPASS'
 #!/bin/sh
 case "$1" in
-  "Username for 'https://github.com'" | "Username for 'https://github.com':" | "Username for 'https://github.com': ")
+  "Username for 'https://github.com'" | "Username for 'https://github.com':" | "Username for 'https://github.com': " | \
+  "Username for 'https://github.com/"*"'" | "Username for 'https://github.com/"*"':" | "Username for 'https://github.com/"*"': ")
     printf '%s\n' x-access-token ;;
   "Password for 'https://x-access-token@github.com'" | "Password for 'https://x-access-token@github.com':" | "Password for 'https://x-access-token@github.com': " | \
-  "Password for 'https://github.com'" | "Password for 'https://github.com':" | "Password for 'https://github.com': ")
+  "Password for 'https://x-access-token@github.com/"*"'" | "Password for 'https://x-access-token@github.com/"*"':" | "Password for 'https://x-access-token@github.com/"*"': " | \
+  "Password for 'https://github.com'" | "Password for 'https://github.com':" | "Password for 'https://github.com': " | \
+  "Password for 'https://github.com/"*"'" | "Password for 'https://github.com/"*"':" | "Password for 'https://github.com/"*"': ")
     printf '%s\n' "$PRIVATE_DEPS_TOKEN" ;;
   *) exit 1 ;;
 esac
@@ -71,7 +77,9 @@ export GIT_CONFIG_COUNT="$n"
 export GIT_ASKPASS="$tmp/askpass"
 export GIT_TERMINAL_PROMPT=0
 
-# Run as a child (not exec) so the EXIT trap can remove the helper.
+# Run as a child (not exec) so the EXIT trap can remove the helper. Job
+# control puts it in its own process group so signals can reach descendants.
+set -m
 "$@" <&0 &
 child=$!
 rc=0

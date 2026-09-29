@@ -39,6 +39,13 @@ check "password prompt answered (with user)" \
 check "password prompt answered (bare host)" \
   test "$(ask "Password for 'https://github.com': ")" = "$canary"
 
+check "password prompt answered (path-qualified)" \
+  test "$(ask "Password for 'https://x-access-token@github.com/owner/repo.git': ")" = "$canary"
+check "password prompt answered (bare host, path-qualified)" \
+  test "$(ask "Password for 'https://github.com/owner/repo.git': ")" = "$canary"
+check "username prompt answered (path-qualified)" \
+  test "$(ask "Username for 'https://github.com/owner/repo.git': ")" = "x-access-token"
+
 # --- lookalike / foreign hosts refused ---
 for p in \
   "Username for 'https://evil.example': " \
@@ -51,6 +58,10 @@ for p in \
   "Password for 'https://attacker@github.com': " \
   "Password for 'https://x-access-token@github.com@evil.example': " \
   "Username for 'http://github.com': " \
+  "Password for 'https://x-access-token@github.com.evil.example/owner/repo.git': " \
+  "Password for 'https://x-access-token@github.comevil/owner/repo.git': " \
+  "Password for 'https://github.com:8443/owner/repo.git': " \
+  "Password for 'http://x-access-token@github.com/owner/repo.git': " \
   "Username for 'https://gist.github.com': " \
   "Passphrase for key '/home/x/.ssh/id_rsa': " \
   ""; do
@@ -87,15 +98,18 @@ check "temp dir empty after failure" test -z "$(ls -A "$TMPDIR")"
 PRIVATE_DEPS_TOKEN="$canary" "$helper" nonexistent-command-xyz >/dev/null 2>&1
 check "temp dir empty after command-not-found" test -z "$(ls -A "$TMPDIR")"
 
-# termination: the signal is forwarded to the child and the temp dir is removed
-PRIVATE_DEPS_TOKEN="$canary" "$helper" bash -c 'echo $$ >"$0"; exec sleep 30' "$work/childpid" >/dev/null 2>&1 &
+# termination: the signal reaches the child and its descendants; temp dir is removed
+PRIVATE_DEPS_TOKEN="$canary" "$helper" bash -c 'echo $$ >"$0"; sleep 30 & echo $! >"$1"; wait' "$work/childpid" "$work/grandchildpid" >/dev/null 2>&1 &
 wpid=$!
-for _ in $(seq 100); do [[ -s $work/childpid ]] && break; sleep 0.1; done
+for _ in $(seq 100); do [[ -s $work/grandchildpid ]] && break; sleep 0.1; done
 cpid="$(cat "$work/childpid" 2>/dev/null || true)"
+gpid="$(cat "$work/grandchildpid" 2>/dev/null || true)"
 kill -TERM "$wpid"
 wait "$wpid" 2>/dev/null; rc=$?
 check "SIGTERM: wrapper exits non-zero" test "$rc" -ne 0
 check "SIGTERM: child terminated" bash -c '! kill -0 "$1" 2>/dev/null' _ "$cpid"
+sleep 0.2
+check "SIGTERM: descendant terminated" bash -c '[[ -n $1 ]] && ! kill -0 "$1" 2>/dev/null' _ "$gpid"
 check "SIGTERM: temp dir removed" test -z "$(ls -A "$TMPDIR")"
 
 # --- environment handling ---
@@ -132,6 +146,15 @@ out="$(fill github.com)"
 check "git credential fill: github.com gets x-access-token" grep -qx 'username=x-access-token' <<<"$out"
 check "git credential fill: github.com gets the token" grep -qx "password=$canary" <<<"$out"
 check "git credential fill: inherited helper bypassed" bash -c '! grep -q evil-helper-secret <<<"$1"' _ "$out"
+git config --global credential.useHttpPath true
+out="$(printf 'protocol=https\nhost=github.com\npath=owner/repo.git\n\n' |
+  PRIVATE_DEPS_TOKEN="$canary" "$helper" git credential fill 2>"$work/err")"
+check "git credential fill (useHttpPath): token supplied" grep -qx "password=$canary" <<<"$out"
+check "git credential fill (useHttpPath): inherited helper bypassed" bash -c '! grep -q evil-helper-secret <<<"$1"' _ "$out"
+out="$(printf 'protocol=https\nhost=github.com.evil.example\npath=owner/repo.git\n\n' |
+  PRIVATE_DEPS_TOKEN="$canary" "$helper" git credential fill 2>"$work/err")"
+check "git credential fill (useHttpPath): lookalike host gets no token" bash -c '! grep -qF "$2" <<<"$1"' _ "$out" "$canary"
+git config --global --unset credential.useHttpPath
 out="$(fill github.com.evil.example)"
 check "git credential fill: lookalike host gets no token" bash -c '! grep -qF "$2" <<<"$1"' _ "$out" "$canary"
 out="$(fill evil.example)"

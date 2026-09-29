@@ -67,10 +67,15 @@ wrapper sets, for the command only:
   credential helpers (`credential.helper=`, so nothing is stored), and fixing
   the username to `x-access-token`;
 - `GIT_ASKPASS`, a temp helper that answers only the `github.com` username and
-  password prompts and exits 1 for anything else (other hosts, lookalikes such
+  password prompts (with or without a repository path, so
+  `credential.useHttpPath=true` works) and exits 1 for anything else (other hosts, lookalikes such
   as `github.com.example`, other ports). The token is never in a URL, so git
   error messages do not print it;
 - `GIT_TERMINAL_PROMPT=0`.
+
+The command runs in its own process group; if the wrapper receives `INT` or
+`TERM`, the signal is sent to the whole group so no descendant outlives it
+holding the token.
 
 Afterwards a later step sees no `GIT_CONFIG_*`, no `GIT_ASKPASS`, no github.com
 entry in `git config --global --list`, no `~/.git-credentials`, and nothing new
