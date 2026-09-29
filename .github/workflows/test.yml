@@ -1,0 +1,100 @@
+name: test
+
+# Runs without secrets: safe on pull_request from forks.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  leak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Record baseline
+        run: wc -c <"$GITHUB_ENV" >"$RUNNER_TEMP/github_env.size"
+
+      - name: Run with git authentication (inside view)
+        id: priv
+        uses: ./private-deps
+        with:
+          token: dummy-canary
+          run: |
+            test -n "$GIT_ASKPASS"
+            test "$GIT_TERMINAL_PROMPT" = 0
+            test "$("$GIT_ASKPASS" "Username for 'https://github.com': ")" = x-access-token
+            test "$("$GIT_ASKPASS" "Password for 'https://x-access-token@github.com': ")" = dummy-canary
+            ! "$GIT_ASKPASS" "Password for 'https://x-access-token@github.com.evil.example': "
+            git config --get-all url.https://github.com/.insteadOf | grep -qx 'git@github.com:'
+            git config --get-all url.https://github.com/.insteadOf | grep -qx 'ssh://git@github.com/'
+            printf 'protocol=https\nhost=github.com\n\n' | git credential fill | grep -qx 'password=dummy-canary'
+            pwd
+
+      - name: Assert no residue (outside view)
+        env:
+          OUT_TOKEN: ${{ steps.priv.outputs.token }}
+        run: |
+          fail=0
+          bad() { echo "::error::$1"; fail=1; }
+          env | grep -E '^(GIT_CONFIG_|GIT_ASKPASS|PRIVATE_DEPS_)' && bad "git/private-deps env leaked"
+          env | grep -q 'dummy-canary' && bad "canary present in environment"
+          git config --global --list 2>/dev/null | grep -qi 'github\.com' && bad "github.com in global git config"
+          test -e "$HOME/.git-credentials" && bad "git-credentials file exists in HOME"
+          git config --list --show-origin | grep -q 'dummy-canary' && bad "canary in git config"
+          test "$(wc -c <"$GITHUB_ENV")" = "$(cat "$RUNNER_TEMP/github_env.size")" || bad "GITHUB_ENV changed"
+          grep -q 'dummy-canary' "$GITHUB_ENV" && bad "canary in GITHUB_ENV"
+          test "$OUT_TOKEN" = dummy-canary || bad "token output contract broken"
+          exit "$fail"
+
+      - name: Failing command
+        id: failing
+        continue-on-error: true
+        uses: ./private-deps
+        with:
+          token: dummy-canary
+          run: exit 7
+
+      - name: Both modes at once are rejected
+        id: both
+        continue-on-error: true
+        uses: ./private-deps
+        with:
+          token: dummy-canary
+          app-id: '1'
+          private-key: not-a-key
+          repositories: some-repo
+          run: echo should-not-run
+
+      - name: App mode without repositories is rejected
+        id: norepos
+        continue-on-error: true
+        uses: ./private-deps
+        with:
+          app-id: '1'
+          private-key: not-a-key
+          run: echo should-not-run
+
+      - name: No credentials are rejected
+        id: nocreds
+        continue-on-error: true
+        uses: ./private-deps
+        with:
+          run: echo should-not-run
+
+      - name: Assert failure propagation and validation
+        env:
+          FAILING: ${{ steps.failing.outcome }}
+          BOTH: ${{ steps.both.outcome }}
+          NOREPOS: ${{ steps.norepos.outcome }}
+          NOCREDS: ${{ steps.nocreds.outcome }}
+        run: |
+          test "$FAILING" = failure
+          test "$BOTH" = failure
+          test "$NOREPOS" = failure
+          test "$NOCREDS" = failure
